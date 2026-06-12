@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +189,51 @@ func TestBasicSortedOps(t *testing.T) {
 			assert.EqualValues(t, 0, sset.Size(bg))
 			assert.EqualValues(t, 1, store.Dead().Size(bg))
 
+		})
+
+		t.Run("RemoveBefore restores jobs when processing fails", func(t *testing.T) {
+			sset := store.Scheduled()
+			assert.NoError(t, sset.Clear(bg))
+
+			tim := util.Nows()
+			goodJid, goodData := fakeJob()
+			badJid, badData := fakeJob()
+			good2Jid, good2Data := fakeJob()
+			assert.NoError(t, sset.AddElement(bg, tim, goodJid, goodData))
+			assert.NoError(t, sset.AddElement(bg, tim, badJid, badData))
+			assert.NoError(t, sset.AddElement(bg, tim, good2Jid, good2Data))
+			assert.EqualValues(t, 3, sset.Size(bg))
+
+			// Simulate a downstream failure while processing one specific job.
+			processed := 0
+			count, err := sset.RemoveBefore(bg, util.Nows(), 100, func(data []byte) error {
+				if strings.Contains(string(data), badJid) {
+					return errors.New("boom: downstream processing failed")
+				}
+				processed++
+				return nil
+			})
+			// A single failing job must not abort the whole batch, and the
+			// error is not propagated to the caller.
+			assert.NoError(t, err)
+			// Only the two healthy jobs are processed and removed.
+			assert.EqualValues(t, 2, count)
+			assert.Equal(t, 2, processed)
+
+			// The failed job must still be in the set so a later scan retries
+			// it, rather than being silently dropped.
+			assert.EqualValues(t, 1, sset.Size(bg))
+			remaining := []string{}
+			err = sset.Each(bg, func(idx int, e SortedEntry) error {
+				j, err := e.Job()
+				assert.NoError(t, err)
+				remaining = append(remaining, j.Jid)
+				return nil
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, []string{badJid}, remaining)
+
+			assert.NoError(t, sset.Clear(bg))
 		})
 	})
 }

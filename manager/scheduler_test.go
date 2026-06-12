@@ -135,3 +135,75 @@ func addJob(ctx context.Context, t *testing.T, set storage.SortedSet, timestamp 
 	err = set.AddElement(ctx, timestamp, job.Jid, data)
 	assert.NoError(t, err)
 }
+
+// Regression: if the follow-up action of a time-driven scan fails, the job must
+// remain in its source set instead of being removed and lost. Covers the three
+// scan chains: scheduled dispatch, retry backfill, and expired-reservation reap.
+func TestScanChainsKeepJobsOnFailure(t *testing.T) {
+	withRedis(t, "scanfailure", func(t *testing.T, store storage.Store) {
+		bg := context.Background()
+
+		// A payload that cannot be unmarshalled forces the per-job callback in
+		// each scan chain to return an error, simulating an intermittent
+		// downstream failure.
+		corrupt := []byte("{ this is not valid json")
+
+		t.Run("EnqueueScheduledJobs", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+
+			expiry := util.Thens(time.Now())
+			err = store.Scheduled().AddElement(bg, expiry, "scheduled0000001", corrupt)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1, store.Scheduled().Size(bg))
+
+			count, err := m.EnqueueScheduledJobs(bg, time.Now())
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, count)
+			assert.EqualValues(t, 0, q.Size(bg))
+			// The job is neither enqueued nor lost: it stays scheduled.
+			assert.EqualValues(t, 1, store.Scheduled().Size(bg))
+		})
+
+		t.Run("RetryJobs", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			q, err := store.GetQueue(bg, "default")
+			assert.NoError(t, err)
+
+			expiry := util.Thens(time.Now())
+			err = store.Retries().AddElement(bg, expiry, "retry00000000001", corrupt)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1, store.Retries().Size(bg))
+
+			count, err := m.RetryJobs(bg, time.Now())
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, count)
+			assert.EqualValues(t, 0, q.Size(bg))
+			// The job is neither retried into a queue nor lost.
+			assert.EqualValues(t, 1, store.Retries().Size(bg))
+		})
+
+		t.Run("ReapExpiredJobs", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			// An already-expired reservation whose payload cannot be parsed.
+			past := util.Thens(time.Now().Add(-1 * time.Minute))
+			err := store.Working().AddElement(bg, past, "working000000001", corrupt)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1, store.Working().Size(bg))
+
+			count, err := m.ReapExpiredJobs(bg, time.Now())
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, count)
+			assert.EqualValues(t, 0, store.Retries().Size(bg))
+			// The reservation is neither failed into retries nor lost.
+			assert.EqualValues(t, 1, store.Working().Size(bg))
+		})
+	})
+}

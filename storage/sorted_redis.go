@@ -269,7 +269,7 @@ func (rs *redisSorted) RemoveBefore(ctx context.Context, timestamp string, maxCo
 	time_f := float64(tim.Unix()) + (float64(tim.Nanosecond()) / 1000000000)
 	strf := strconv.FormatFloat(time_f, 'f', -1, 64)
 
-	vals := rs.store.rclient.ZRangeByScore(ctx, rs.name, &redis.ZRangeBy{Min: "-inf", Max: strf, Count: maxCount})
+	vals := rs.store.rclient.ZRangeByScoreWithScores(ctx, rs.name, &redis.ZRangeBy{Min: "-inf", Max: strf, Count: maxCount})
 	jobs, err := vals.Result()
 	if err != nil {
 		return 0, err
@@ -280,15 +280,26 @@ func (rs *redisSorted) RemoveBefore(ctx context.Context, timestamp string, maxCo
 
 	count := int64(0)
 	for idx := range jobs {
-		j := jobs[idx]
-		cnt, err := rs.store.rclient.ZRem(ctx, rs.name, j).Result()
+		elm := jobs[idx].Member.(string)
+		// ZREM acts as an atomic claim: only the caller that actually removes
+		// the element is allowed to process it, so concurrent scanners never
+		// handle the same job twice.
+		cnt, err := rs.store.rclient.ZRem(ctx, rs.name, elm).Result()
 		if err != nil {
 			return count, err
 		}
 		if cnt == 1 {
-			err = fn([]byte(j))
+			err = fn([]byte(elm))
 			if err != nil {
 				util.Warnf("Unable to process timed job: %v", err)
+				// Processing failed after we claimed the element. Put it back
+				// with its original score so the job is not lost: without this
+				// the job would be neither enqueued nor present in the set. It
+				// will be retried on a later scan once the downstream action
+				// recovers.
+				if rerr := rs.store.rclient.ZAdd(ctx, rs.name, redis.Z{Score: jobs[idx].Score, Member: elm}).Err(); rerr != nil {
+					util.Warnf("Unable to restore timed job after processing failure: %v", rerr)
+				}
 				continue
 			}
 			count++
