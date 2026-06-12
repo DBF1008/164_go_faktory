@@ -152,6 +152,14 @@ func newWorkers() *workers {
 	}
 }
 
+// heartbeatResult is returned by workers.heartbeat() with the worker state
+// captured atomically under the lock, so callers never read stale or racy state.
+type heartbeatResult struct {
+	cd    *ClientData
+	state WorkerState
+	ok    bool
+}
+
 func (w *workers) Count() int {
 	w.mu.RLock()
 	defer w.mu.RUnlock()
@@ -180,29 +188,24 @@ func (w *workers) setupHeartbeat(client *ClientData, cls io.Closer) (*ClientData
 	return entry, ok
 }
 
-func (w *workers) heartbeat(client *ClientBeat) (*ClientData, bool) {
-	w.mu.RLock()
-	entry, ok := w.heartbeats[client.Wid]
-	w.mu.RUnlock()
-
-	if !ok {
-		return nil, ok
-	}
-
-	// util.Debugf("BEAT for %s", client.Wid)
-
-	newst := entry.state
-	if client.CurrentState != "" {
-		newst = stateFromString(client.CurrentState)
-	}
+func (w *workers) heartbeat(client *ClientBeat) heartbeatResult {
 	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	entry, ok := w.heartbeats[client.Wid]
+	if !ok {
+		return heartbeatResult{ok: false}
+	}
+
 	entry.RssKb = client.RssKb
 	entry.lastHeartbeat = time.Now()
-	if entry.state != newst {
-		entry.Signal(newst)
+	if client.CurrentState != "" {
+		newst := stateFromString(client.CurrentState)
+		if entry.state != newst {
+			entry.Signal(newst)
+		}
 	}
-	w.mu.Unlock()
-	return entry, ok
+	return heartbeatResult{cd: entry, state: entry.state, ok: true}
 }
 
 func (w *workers) RemoveConnection(c *Connection) {
@@ -250,4 +253,77 @@ func (w *workers) reapHeartbeats(t time.Time) int {
 		}
 	}
 	return count
+}
+
+// Snapshot returns a point-in-time copy of all tracked workers.
+// Each returned *ClientData is a shallow copy — safe to read without holding
+// the lock because the mutable fields (RssKb, state, lastHeartbeat, connections)
+// are copied by value and will not change on the snapshot even as the live
+// worker is updated by other goroutines.
+func (w *workers) Snapshot() []*ClientData {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	result := make([]*ClientData, 0, len(w.heartbeats))
+	for _, cd := range w.heartbeats {
+		cp := *cd
+		result = append(result, &cp)
+	}
+	return result
+}
+
+// SignalOne sends a signal to a single worker identified by wid.
+// Returns true if the worker was found.
+func (w *workers) SignalOne(wid string, state WorkerState) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	cd, ok := w.heartbeats[wid]
+	if !ok {
+		return false
+	}
+	cd.Signal(state)
+	return true
+}
+
+// SignalAll sends a signal to every tracked worker.
+// Returns the number of workers whose state actually changed.
+func (w *workers) SignalAll(state WorkerState) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	changed := 0
+	for _, cd := range w.heartbeats {
+		before := cd.state
+		cd.Signal(state)
+		if cd.state != before {
+			changed++
+		}
+	}
+	return changed
+}
+
+// State returns the current state of a worker.
+// Returns (Running, false) if the worker is not found.
+func (w *workers) State(wid string) (WorkerState, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	cd, ok := w.heartbeats[wid]
+	if !ok {
+		return Running, false
+	}
+	return cd.state, true
+}
+
+// SetupWorker registers a worker for testing purposes.
+func (w *workers) SetupWorker(cd *ClientData) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if cd.connections == nil {
+		cd.connections = map[io.Closer]bool{}
+	}
+	if cd.lastHeartbeat.IsZero() {
+		cd.lastHeartbeat = time.Now()
+	}
+	if cd.StartedAt.IsZero() {
+		cd.StartedAt = time.Now()
+	}
+	w.heartbeats[cd.Wid] = cd
 }

@@ -235,7 +235,8 @@ func push(c *Connection, s *Server, cmd string) {
 
 // FETCH critical default bulk
 func fetch(c *Connection, s *Server, cmd string) {
-	if c.client.state != Running {
+	st, _ := s.workers.State(c.client.Wid)
+	if st != Running {
 		// quiet or terminated workers should not get new jobs
 		time.Sleep(2 * time.Second)
 		_ = c.Result(nil)
@@ -339,15 +340,15 @@ func heartbeat(c *Connection, s *Server, cmd string) {
 		return
 	}
 
-	worker, ok := s.workers.heartbeat(&beat)
-	if !ok {
+	res := s.workers.heartbeat(&beat)
+	if !res.ok {
 		_ = c.Error(cmd, fmt.Errorf("unknown worker %s", beat.Wid))
 		return
 	}
 
-	if worker.state == Running {
+	if res.state == Running {
 		_ = c.Ok()
 	} else {
-		_ = c.Result(fmt.Appendf(nil, `{"state":%q}`, stateString(worker.state)))
+		_ = c.Result(fmt.Appendf(nil, `{"state":%q}`, stateString(res.state)))
 	}
 }

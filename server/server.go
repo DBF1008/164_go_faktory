@@ -53,6 +53,12 @@ type Server struct {
 	closed bool
 }
 
+func (s *Server) isClosed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closed
+}
+
 func (s *Server) useTLS() error {
 	privateKey := filepath.Join(s.Options.ConfigDirectory, "private.key.pem")
 	publicCert := filepath.Join(s.Options.ConfigDirectory, "public.cert.pem")
@@ -108,8 +114,25 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 	return s, nil
 }
 
-func (s *Server) Heartbeats() map[string]*ClientData {
-	return s.workers.heartbeats
+// WorkerSnapshots returns a point-in-time copy of all tracked workers,
+// safe to iterate and read without holding any lock.
+func (s *Server) WorkerSnapshots() []*ClientData {
+	return s.workers.Snapshot()
+}
+
+// SignalWorker sends a signal to a single worker identified by wid.
+func (s *Server) SignalWorker(wid string, state WorkerState) bool {
+	return s.workers.SignalOne(wid, state)
+}
+
+// SignalAllWorkers sends a signal to every tracked worker.
+func (s *Server) SignalAllWorkers(state WorkerState) int {
+	return s.workers.SignalAll(state)
+}
+
+// SetupWorker registers a worker in the heartbeat tracker (for testing).
+func (s *Server) SetupWorker(cd *ClientData) {
+	s.workers.SetupWorker(cd)
 }
 
 func (s *Server) Store() storage.Store {
@@ -378,7 +401,7 @@ func (s *Server) processLines(conn *Connection) {
 			}
 			return
 		}
-		if s.closed {
+		if s.isClosed() {
 			_ = conn.Error("Closing connection", fmt.Errorf("shutdown in progress"))
 			return
 		}
