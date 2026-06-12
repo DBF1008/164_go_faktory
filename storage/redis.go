@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,7 +31,7 @@ type redisStore struct {
 
 	rclient *redis.Client
 	Name    string
-	mu      sync.Mutex
+	mu      sync.RWMutex
 }
 
 func NewRedisStore(name string, rclient *redis.Client) (Store, error) {
@@ -39,7 +40,7 @@ func NewRedisStore(name string, rclient *redis.Client) (Store, error) {
 
 	rs := &redisStore{
 		Name:     name,
-		mu:       sync.Mutex{},
+		mu:       sync.RWMutex{},
 		queueSet: map[string]*redisQueue{},
 		rclient:  rclient,
 	}
@@ -57,6 +58,20 @@ func NewRedisStore(name string, rclient *redis.Client) (Store, error) {
 			continue
 		}
 		rs.queueSet[vals[idx]] = q
+	}
+
+	// Rebuild the in-memory paused mirror from Redis so paused state
+	// survives a restart. Pause only ever applies to existing queues,
+	// so the mirror equals the Redis "paused" set restricted to known
+	// queues; any orphaned name is harmlessly ignored.
+	paused, err := rs.rclient.SMembers(ctx, "paused").Result()
+	if err != nil {
+		return nil, err
+	}
+	for idx := range paused {
+		if q, ok := rs.queueSet[paused[idx]]; ok {
+			q.paused = true
+		}
 	}
 	return rs, nil
 }
@@ -241,19 +256,54 @@ func (store *redisStore) Stats(ctx context.Context) map[string]string {
 	}
 }
 
-func (store *redisStore) PausedQueues(ctx context.Context) ([]string, error) {
-	return store.rclient.SMembers(ctx, "paused").Result()
+// PausedQueues returns the names of all paused queues, read from the
+// in-memory mirror (the single source of truth) so it always agrees with
+// Queue.IsPaused and the fetch path. Sorted for deterministic output;
+// always non-nil.
+func (store *redisStore) PausedQueues(_ context.Context) ([]string, error) {
+	store.mu.RLock()
+	names := make([]string, 0, len(store.queueSet))
+	for name, q := range store.queueSet {
+		if q.paused {
+			names = append(names, name)
+		}
+	}
+	store.mu.RUnlock()
+
+	sort.Strings(names)
+	return names, nil
 }
 
-// queues are iterated in sorted, lexigraphical order
-func (store *redisStore) EachQueue(ctx context.Context, x func(Queue)) {
-	for _, k := range store.queueSet {
-		x(k)
+// queues are iterated in sorted, lexicographical order. A snapshot of the
+// queue set is taken under the lock and the callback runs without it, so the
+// callback may safely mutate the queue set (e.g. Clear during QUEUE REMOVE *).
+func (store *redisStore) EachQueue(_ context.Context, x func(Queue)) {
+	store.mu.RLock()
+	queues := make([]*redisQueue, 0, len(store.queueSet))
+	for _, q := range store.queueSet {
+		queues = append(queues, q)
+	}
+	store.mu.RUnlock()
+
+	sort.Slice(queues, func(i, j int) bool {
+		return queues[i].name < queues[j].name
+	})
+	for _, q := range queues {
+		x(q)
 	}
 }
 
 func (store *redisStore) Flush(ctx context.Context) error {
-	return store.rclient.FlushDB(ctx).Err()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	if err := store.rclient.FlushDB(ctx).Err(); err != nil {
+		return err
+	}
+	// FLUSHDB wiped Redis; drop the in-memory queue set (and the paused
+	// flags those queues carry) so the store stays consistent with Redis.
+	store.queueSet = map[string]*redisQueue{}
+	return nil
 }
 
 var (
@@ -262,6 +312,8 @@ var (
 
 // returns an existing, known queue or nil
 func (store *redisStore) ExistingQueue(_ context.Context, name string) (Queue, bool) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 	q, ok := store.queueSet[name]
 	return q, ok
 }

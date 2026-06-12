@@ -25,7 +25,6 @@ func (m *manager) RemoveQueue(ctx context.Context, qName string) error {
 			return fmt.Errorf("cannot remove queue: %w", err)
 		}
 	}
-	m.paused = filter([]string{qName}, m.paused)
 	return nil
 }
 
@@ -36,7 +35,6 @@ func (m *manager) PauseQueue(ctx context.Context, qName string) error {
 		if err != nil {
 			return fmt.Errorf("cannot pause queue: %w", err)
 		}
-		m.paused = append(filter([]string{qName}, m.paused), qName)
 	}
 	return nil
 }
@@ -48,8 +46,6 @@ func (m *manager) ResumeQueue(ctx context.Context, qName string) error {
 		if err != nil {
 			return fmt.Errorf("cannot resume queue: %w", err)
 		}
-
-		m.paused = filter([]string{qName}, m.paused)
 	}
 	return nil
 }
@@ -82,7 +78,14 @@ func (m *manager) Fetch(ctx context.Context, wid string, queues ...string) (*cli
 	}
 
 restart:
-	activeQueues := filter(m.paused, queues)
+	// Read paused queues from storage (the single source of truth) on every
+	// attempt so out-of-band pause/resume/remove — including a DISCARD retry
+	// below — is honoured immediately.
+	paused, err := m.store.PausedQueues(ctx)
+	if err != nil {
+		return nil, err
+	}
+	activeQueues := filter(paused, queues)
 	if len(activeQueues) == 0 {
 		// if we pause all queues, there is nothing to fetch
 		select {

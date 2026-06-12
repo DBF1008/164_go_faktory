@@ -14,6 +14,11 @@ type redisQueue struct {
 	store *redisStore
 	name  string
 	done  bool
+	// paused mirrors membership in the Redis "paused" set. It is the
+	// single in-memory source of truth for whether this queue is paused
+	// and is kept in lockstep with Redis by Pause/Resume/Clear (all of
+	// which hold store.mu). Reads go through store.mu.RLock().
+	paused bool
 }
 
 func (store *redisStore) NewQueue(name string) *redisQueue {
@@ -25,16 +30,31 @@ func (store *redisStore) NewQueue(name string) *redisQueue {
 }
 
 func (q *redisQueue) Pause(ctx context.Context) error {
-	return q.store.rclient.SAdd(ctx, "paused", q.name).Err()
+	q.store.mu.Lock()
+	defer q.store.mu.Unlock()
+
+	if err := q.store.rclient.SAdd(ctx, "paused", q.name).Err(); err != nil {
+		return err
+	}
+	q.paused = true
+	return nil
 }
 
 func (q *redisQueue) Resume(ctx context.Context) error {
-	return q.store.rclient.SRem(ctx, "paused", q.name).Err()
+	q.store.mu.Lock()
+	defer q.store.mu.Unlock()
+
+	if err := q.store.rclient.SRem(ctx, "paused", q.name).Err(); err != nil {
+		return err
+	}
+	q.paused = false
+	return nil
 }
 
-func (q *redisQueue) IsPaused(ctx context.Context) bool {
-	b, _ := q.store.rclient.SIsMember(ctx, "paused", q.name).Result()
-	return b
+func (q *redisQueue) IsPaused(_ context.Context) bool {
+	q.store.mu.RLock()
+	defer q.store.mu.RUnlock()
+	return q.paused
 }
 
 func (q *redisQueue) Close() {
@@ -77,6 +97,7 @@ func (q *redisQueue) Clear(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 
+	q.paused = false
 	delete(q.store.queueSet, q.name)
 	return 0, nil
 }

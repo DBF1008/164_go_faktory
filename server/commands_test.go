@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/contribsys/faktory/client"
+	"github.com/contribsys/faktory/storage"
 	"github.com/contribsys/faktory/util"
 	"github.com/stretchr/testify/assert"
 )
@@ -103,6 +104,80 @@ func TestCommands(t *testing.T) {
 			pushBulk(c, s, cmd)
 			txt = output(c)
 			assert.Equal(t, fmt.Sprintf("$57\r\n{%q:\"jobs must have a jobtype parameter\"}\r\n", job1.Jid), txt)
+		})
+	})
+}
+
+// TestQueueWildcards covers the QUEUE *  wildcard batch operations end to end,
+// confirming they touch every queue (no drift) and that paused state stays
+// consistent across the storage views afterwards.
+func TestQueueWildcards(t *testing.T) {
+	runServer("localhost:7421", func(s *Server) {
+		t.Run("wildcard remove removes every queue", func(t *testing.T) {
+			c := dummyConnection()
+			ctx := c.Context
+			assert.NoError(t, s.Store().Flush(ctx))
+
+			for _, n := range []string{"q1", "q2", "q3", "q4", "q5"} {
+				j := client.NewJob("SomeJob", 1)
+				j.Queue = n
+				assert.NoError(t, s.Manager().Push(ctx, j))
+			}
+			// pause a couple to also prove their paused state is cleared
+			assert.NoError(t, s.Manager().PauseQueue(ctx, "q2"))
+			assert.NoError(t, s.Manager().PauseQueue(ctx, "q4"))
+
+			count := 0
+			s.Store().EachQueue(ctx, func(storage.Queue) { count++ })
+			assert.Equal(t, 5, count)
+
+			queue(c, s, "QUEUE REMOVE *")
+			assert.Equal(t, "+OK\r\n", output(c))
+
+			// every queue must be gone and no paused flag may linger. The
+			// unified remove path clears Redis and the in-memory mirror
+			// together, and EachQueue iterates a snapshot so a wildcard REMOVE
+			// that mutates the queue set mid-iteration stays consistent.
+			count = 0
+			s.Store().EachQueue(ctx, func(storage.Queue) { count++ })
+			assert.Equal(t, 0, count)
+
+			pq, err := s.Store().PausedQueues(ctx)
+			assert.NoError(t, err)
+			assert.Equal(t, []string{}, pq)
+		})
+
+		t.Run("wildcard pause then resume every queue", func(t *testing.T) {
+			c := dummyConnection()
+			ctx := c.Context
+			assert.NoError(t, s.Store().Flush(ctx))
+
+			names := []string{"w1", "w2", "w3"}
+			for _, n := range names {
+				j := client.NewJob("SomeJob", 1)
+				j.Queue = n
+				assert.NoError(t, s.Manager().Push(ctx, j))
+			}
+
+			queue(c, s, "QUEUE PAUSE *")
+			assert.Equal(t, "+OK\r\n", output(c))
+
+			pq, err := s.Store().PausedQueues(ctx)
+			assert.NoError(t, err)
+			assert.Equal(t, names, pq) // PausedQueues is sorted; names already sorted
+			s.Store().EachQueue(ctx, func(q storage.Queue) {
+				assert.True(t, q.IsPaused(ctx), "queue %s should be paused", q.Name())
+			})
+
+			queue(c, s, "QUEUE RESUME *")
+			assert.Equal(t, "+OK\r\n", output(c))
+
+			pq, err = s.Store().PausedQueues(ctx)
+			assert.NoError(t, err)
+			assert.Equal(t, []string{}, pq)
+			s.Store().EachQueue(ctx, func(q storage.Queue) {
+				assert.False(t, q.IsPaused(ctx), "queue %s should be active", q.Name())
+			})
 		})
 	})
 }
