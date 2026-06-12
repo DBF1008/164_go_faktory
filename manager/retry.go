@@ -86,7 +86,9 @@ func (m *manager) processFailure(ctx context.Context, jid string, failure *FailP
 	// A reservation can have a nil Lease if we restarted
 	if res.lease != nil {
 		if err := res.lease.Release(); err != nil {
-			return fmt.Errorf("cannot release the lease: %w", err)
+			// Don't let a lease release error prevent job
+			// retry processing — log and continue.
+			util.Warnf("Error releasing lease for %s: %v", jid, err)
 		}
 	}
 
@@ -95,6 +97,7 @@ func (m *manager) processFailure(ctx context.Context, jid string, failure *FailP
 	if failure != JobReservationExpired {
 		ok, err := m.store.Working().RemoveElement(ctx, res.Expiry, jid)
 		if err != nil {
+			m.restoreReservation(jid, res)
 			return err
 		}
 		if !ok {
@@ -129,7 +132,7 @@ func (m *manager) processFailure(ctx context.Context, jid string, failure *FailP
 	}
 
 	ctxh := context.WithValue(ctx, MiddlewareHelperKey, Ctx{job, m, res})
-	return callMiddleware(ctxh, m.failChain, func() error {
+	err := callMiddleware(ctxh, m.failChain, func() error {
 		if job.Retry == nil || *job.Retry == 0 {
 			// no retry, no death, completely ephemeral, goodbye
 			return nil
@@ -139,6 +142,26 @@ func (m *manager) processFailure(ctx context.Context, jid string, failure *FailP
 		}
 		return sendToMorgue(ctx, m.store, job)
 	})
+	if err != nil {
+		// Processing failed — restore the reservation so the
+		// next ReapExpiredJobs scan (or Fail retry) can pick
+		// it up again.  RemoveBefore keeps the sorted-set
+		// entry intact when the callback returns an error,
+		// so together they prevent job loss.
+		m.restoreReservation(jid, res)
+		return err
+	}
+	return nil
+}
+
+// restoreReservation puts a reservation back into workingMap if it
+// has not already been replaced by a new reservation for the same JID.
+func (m *manager) restoreReservation(jid string, res *Reservation) {
+	m.workingMutex.Lock()
+	if _, exists := m.workingMap[jid]; !exists {
+		m.workingMap[jid] = res
+	}
+	m.workingMutex.Unlock()
 }
 
 func retryLater(ctx context.Context, store storage.Store, job *client.Job) error {

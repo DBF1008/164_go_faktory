@@ -125,6 +125,44 @@ func TestScheduler(t *testing.T) {
 			assert.EqualValues(t, 1, q.Size(bg))
 			assert.EqualValues(t, 0, store.Retries().Size(bg))
 		})
+
+		// Regression: if enqueue fails, the job must stay in the
+		// scheduled set so the next scan can retry it.
+		t.Run("EnqueueScheduledJobs_KeepsJobOnEnqueueFailure", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			// Insert corrupt JSON so unmarshal fails inside the
+			// schedule() callback, simulating an enqueue failure.
+			expiry := util.Thens(time.Now())
+			err := store.Scheduled().AddElement(bg, expiry, "badjid", []byte(`{invalid json`))
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1, store.Scheduled().Size(bg))
+
+			count, err := m.EnqueueScheduledJobs(bg, time.Now())
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, count)
+			// Job MUST still be in the scheduled set — not lost.
+			assert.EqualValues(t, 1, store.Scheduled().Size(bg))
+		})
+
+		// Regression: if enqueue fails, the job must stay in the
+		// retries set so the next scan can retry it.
+		t.Run("RetryJobs_KeepsJobOnEnqueueFailure", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := NewManager(store)
+
+			expiry := util.Thens(time.Now())
+			err := store.Retries().AddElement(bg, expiry, "badjid", []byte(`{invalid json`))
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1, store.Retries().Size(bg))
+
+			count, err := m.RetryJobs(bg, time.Now())
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, count)
+			// Job MUST still be in the retries set — not lost.
+			assert.EqualValues(t, 1, store.Retries().Size(bg))
+		})
 	})
 }
 

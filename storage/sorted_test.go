@@ -190,3 +190,68 @@ func TestBasicSortedOps(t *testing.T) {
 		})
 	})
 }
+
+// Regression: RemoveBefore must NOT remove an entry when the callback
+// returns an error, so the next scan can retry it.
+func TestRemoveBeforePreservesEntryOnCallbackError(t *testing.T) {
+	withRedis(t, "removebefore", func(t *testing.T, store Store) {
+		bg := context.Background()
+		sset := store.Retries()
+		assert.NoError(t, sset.Clear(bg))
+
+		tim := util.Nows()
+		jid, data := fakeJob()
+		err := sset.AddElement(bg, tim, jid, data)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 1, sset.Size(bg))
+
+		future := util.Thens(time.Now().Add(time.Hour))
+
+		// Callback returns error → entry must stay in the sorted set
+		count, err := sset.RemoveBefore(bg, future, 10, func(d []byte) error {
+			return fmt.Errorf("simulated processing failure")
+		})
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, count)
+		assert.EqualValues(t, 1, sset.Size(bg))
+
+		// Callback succeeds → entry should be removed
+		count, err = sset.RemoveBefore(bg, future, 10, func(d []byte) error {
+			return nil
+		})
+		assert.NoError(t, err)
+		assert.EqualValues(t, 1, count)
+		assert.EqualValues(t, 0, sset.Size(bg))
+	})
+}
+
+// Regression: when a batch contains both failing and succeeding callbacks,
+// only the successful entries are removed.
+func TestRemoveBeforeMixedCallbacks(t *testing.T) {
+	withRedis(t, "removebeforemixed", func(t *testing.T, store Store) {
+		bg := context.Background()
+		sset := store.Retries()
+		assert.NoError(t, sset.Clear(bg))
+
+		// Add 3 jobs
+		for range 3 {
+			jid, data := fakeJob()
+			err := sset.AddElement(bg, util.Nows(), jid, data)
+			assert.NoError(t, err)
+		}
+		assert.EqualValues(t, 3, sset.Size(bg))
+
+		future := util.Thens(time.Now().Add(time.Hour))
+		callCount := 0
+		count, err := sset.RemoveBefore(bg, future, 10, func(d []byte) error {
+			callCount++
+			if callCount == 2 {
+				return fmt.Errorf("fail on second entry")
+			}
+			return nil
+		})
+		assert.NoError(t, err)
+		assert.EqualValues(t, 2, count)      // 1st and 3rd succeeded
+		assert.EqualValues(t, 1, sset.Size(bg)) // 2nd stayed
+	})
+}

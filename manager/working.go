@@ -212,7 +212,20 @@ func (m *manager) ReapExpiredJobs(ctx context.Context, when time.Time) (int64, e
 				localres.texpiry = localres.extension
 				localres.Expiry = util.Thens(localres.extension)
 				util.Debugf("Auto-extending reservation time for %s to %s", jid, localres.Expiry)
-				err = m.store.Working().AddElement(ctx, localres.Expiry, jid, data)
+				// Re-marshal with updated expiry fields so the
+				// stored payload stays consistent with the score.
+				updatedData, err := json.Marshal(localres)
+				if err != nil {
+					return fmt.Errorf("cannot marshal extended reservation for %q job: %w", jid, err)
+				}
+				// Remove old entry first so that RemoveBefore's
+				// subsequent ZRem is a harmless no-op, then add
+				// with the new score.
+				_, err = m.store.Working().RemoveElement(ctx, res.Expiry, jid)
+				if err != nil {
+					return fmt.Errorf("cannot remove old reservation for %q job: %w", jid, err)
+				}
+				err = m.store.Working().AddElement(ctx, localres.Expiry, jid, updatedData)
 				if err != nil {
 					return fmt.Errorf("cannot extend reservation for %q job: %w", jid, err)
 				}

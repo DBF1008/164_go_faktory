@@ -382,15 +382,16 @@ func (store *redisStore) EnqueueAll(ctx context.Context, sset SortedSet) error {
 			return err
 		}
 
-		ok, err := sset.Remove(ctx, k)
+		// Enqueue FIRST so the job is safely in the queue before
+		// we remove it from the sorted set.  If the add fails the
+		// entry stays in the set and the next attempt can retry.
+		err = q.Add(ctx, j)
 		if err != nil {
 			return err
 		}
-		if !ok {
-			return nil
-		}
 
-		return q.Add(ctx, j)
+		_, _ = sset.Remove(ctx, k)
+		return nil
 	})
 }
 
@@ -414,15 +415,16 @@ func (store *redisStore) EnqueueFrom(ctx context.Context, sset SortedSet, key []
 		return err
 	}
 
-	ok, err := sset.Remove(ctx, key)
+	// Enqueue FIRST so the job is safely in the queue before
+	// we remove it from the sorted set.  If the add fails the
+	// entry stays in the set and the next attempt can retry.
+	err = q.Add(ctx, job)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return nil
-	}
 
-	return q.Add(ctx, job)
+	_, _ = sset.Remove(ctx, key)
+	return nil
 }
 
 var (

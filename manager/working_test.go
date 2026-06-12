@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -164,6 +165,47 @@ func TestLoadWorkingSet(t *testing.T) {
 			assert.NoError(t, err)
 			assert.EqualValues(t, 1, count)
 			assert.EqualValues(t, 1, store.Retries().Size(bg))
+		})
+
+		// Regression: when processFailure fails (e.g. middleware error),
+		// the expired job must remain in the working set with its
+		// reservation intact so the next reaper scan can retry it.
+		t.Run("ReapExpiredJobs_KeepsJobOnProcessFailureError", func(t *testing.T) {
+			assert.NoError(t, store.Flush(bg))
+			m := newManager(store)
+
+			// Inject a fail middleware that always returns an error,
+			// causing the middleware chain inside processFailure to fail.
+			m.AddMiddleware("fail", func(ctx context.Context, next func() error) error {
+				return fmt.Errorf("simulated middleware failure")
+			})
+
+			job := client.NewJob("ExpiringJob", 1, 2, 3)
+			retries := 5
+			job.Retry = &retries
+			lease := &simpleLease{job: job}
+			err := m.reserve(bg, "workerId", lease)
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1, store.Working().Size(bg))
+			assert.EqualValues(t, 1, m.WorkingCount())
+
+			// Expire the job — well past the default reservation timeout.
+			exp := time.Now().Add(time.Duration(DefaultTimeout+10) * time.Second)
+			count, err := m.ReapExpiredJobs(bg, exp)
+			// RemoveBefore logs callback errors as warnings and
+			// continues; it does not propagate them.  What matters
+			// is that the job is preserved, not the error code.
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, count)
+
+			// The job MUST still be in the working set — not lost.
+			assert.EqualValues(t, 1, store.Working().Size(bg))
+			// The reservation MUST be restored to workingMap.
+			assert.NotNil(t, m.workingMap[job.Jid])
+			assert.EqualValues(t, 1, m.WorkingCount())
+			// Nothing should have been added to retries or dead.
+			assert.EqualValues(t, 0, store.Retries().Size(bg))
+			assert.EqualValues(t, 0, store.Dead().Size(bg))
 		})
 	})
 }

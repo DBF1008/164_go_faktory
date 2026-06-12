@@ -281,16 +281,20 @@ func (rs *redisSorted) RemoveBefore(ctx context.Context, timestamp string, maxCo
 	count := int64(0)
 	for idx := range jobs {
 		j := jobs[idx]
+		// Process the entry FIRST; only remove from the sorted set
+		// after the callback succeeds.  If fn fails the entry stays
+		// in the set so the next scan can retry it, preventing job
+		// loss on transient errors.
+		err = fn([]byte(j))
+		if err != nil {
+			util.Warnf("Unable to process timed job: %v", err)
+			continue
+		}
 		cnt, err := rs.store.rclient.ZRem(ctx, rs.name, j).Result()
 		if err != nil {
 			return count, err
 		}
 		if cnt == 1 {
-			err = fn([]byte(j))
-			if err != nil {
-				util.Warnf("Unable to process timed job: %v", err)
-				continue
-			}
 			count++
 		}
 	}
@@ -303,14 +307,18 @@ func (rs *redisSorted) MoveTo(ctx context.Context, sset SortedSet, entry SortedE
 		return err
 	}
 
-	cnt, err := rs.store.rclient.ZRem(ctx, rs.name, string(entry.Value())).Result()
+	// Add to destination FIRST so the entry is never lost.
+	// If this succeeds, we then remove from the source set.
+	// A brief duplication window (entry in both sets) is
+	// acceptable — this is an admin-only mutation path and
+	// downstream consumers deduplicate by JID.
+	err = sset.AddElement(ctx, util.Thens(newtime), job.Jid, entry.Value())
 	if err != nil {
 		return err
 	}
-	if cnt == 0 {
-		// race condition, element was removed or moved elsewhere
-		return nil
-	}
 
-	return sset.AddElement(ctx, util.Thens(newtime), job.Jid, entry.Value())
+	// Best-effort removal from source; ignore the rare case
+	// where the entry was already moved concurrently.
+	_, _ = rs.store.rclient.ZRem(ctx, rs.name, string(entry.Value())).Result()
+	return nil
 }
