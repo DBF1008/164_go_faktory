@@ -478,6 +478,236 @@ func TestPages(t *testing.T) {
 	})
 }
 
+func TestBatchActions(t *testing.T) {
+	bootRuntime(t, "batch", func(ui *WebUI, s *server.Server, t *testing.T) {
+		bg := context.Background()
+		str := s.Store()
+
+		// Helper to seed N jobs into a sorted set
+		seed := func(set storage.SortedSet, n int) {
+			for i := 0; i < n; i++ {
+				jid, data := fakeJob()
+				err := set.AddElement(bg, util.Nows(), jid, data)
+				assert.NoError(t, err)
+			}
+		}
+
+		// Helper to collect all keys from a sorted set
+		collectKeys := func(set storage.SortedSet) []string {
+			var keys []string
+			err := set.Each(bg, func(_ int, entry storage.SortedEntry) error {
+				k, err := entry.Key()
+				if err != nil {
+					return err
+				}
+				keys = append(keys, string(k))
+				return nil
+			})
+			assert.NoError(t, err)
+			return keys
+		}
+
+		// Helper to POST an action
+		postAction := func(path string, action string, keys []string) *httptest.ResponseRecorder {
+			payload := url.Values{"action": {action}}
+			for _, k := range keys {
+				payload.Add("key", k)
+			}
+			req, err := ui.NewRequest("POST", "http://localhost:7420"+path, strings.NewReader(payload.Encode()))
+			assert.NoError(t, err)
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w := httptest.NewRecorder()
+			switch path {
+			case "/retries":
+				retriesHandler(w, req)
+			case "/scheduled":
+				scheduledHandler(w, req)
+			case "/morgue":
+				morgueHandler(w, req)
+			}
+			return w
+		}
+
+		t.Run("RetriesKillAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			retries := str.Retries()
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			seed(retries, 3)
+			assert.EqualValues(t, 3, retries.Size(bg))
+			assert.EqualValues(t, 0, dead.Size(bg))
+
+			w := postAction("/retries", "kill", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			// All retries should be moved to dead, NOT enqueued
+			assert.EqualValues(t, 0, retries.Size(bg), "retries should be empty after kill all")
+			assert.EqualValues(t, 3, dead.Size(bg), "all 3 jobs should be in dead after kill all")
+			assert.EqualValues(t, 0, def.Size(bg), "no jobs should be enqueued after kill all")
+		})
+
+		t.Run("RetriesKillSingleVsAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			retries := str.Retries()
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			// Seed 3 jobs, kill each one individually
+			seed(retries, 3)
+			keys := collectKeys(retries)
+			assert.Equal(t, 3, len(keys))
+
+			for _, k := range keys {
+				w := postAction("/retries", "kill", []string{k})
+				assert.Equal(t, 302, w.Code)
+			}
+
+			singleDead := dead.Size(bg)
+			singleQueue := def.Size(bg)
+			assert.EqualValues(t, 0, retries.Size(bg))
+
+			// Now reset and do "kill all"
+			assert.NoError(t, str.Flush(bg))
+			seed(retries, 3)
+			assert.EqualValues(t, 3, retries.Size(bg))
+
+			w := postAction("/retries", "kill", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			// Both paths should produce identical results
+			assert.EqualValues(t, 0, retries.Size(bg), "retries should be empty")
+			assert.EqualValues(t, singleDead, dead.Size(bg), "dead count should match single-item kill")
+			assert.EqualValues(t, singleQueue, def.Size(bg), "queue count should match single-item kill (zero)")
+		})
+
+		t.Run("ScheduledKillAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			scheduled := str.Scheduled()
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			seed(scheduled, 3)
+			assert.EqualValues(t, 3, scheduled.Size(bg))
+			assert.EqualValues(t, 0, dead.Size(bg))
+
+			w := postAction("/scheduled", "kill", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			// All scheduled should be moved to dead, NOT enqueued
+			assert.EqualValues(t, 0, scheduled.Size(bg), "scheduled should be empty after kill all")
+			assert.EqualValues(t, 3, dead.Size(bg), "all 3 jobs should be in dead after kill all")
+			assert.EqualValues(t, 0, def.Size(bg), "no jobs should be enqueued after kill all")
+		})
+
+		t.Run("ScheduledKillSingleVsAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			scheduled := str.Scheduled()
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			// Seed 3 jobs, kill each individually
+			seed(scheduled, 3)
+			keys := collectKeys(scheduled)
+			assert.Equal(t, 3, len(keys))
+
+			for _, k := range keys {
+				w := postAction("/scheduled", "kill", []string{k})
+				assert.Equal(t, 302, w.Code)
+			}
+
+			singleDead := dead.Size(bg)
+			singleQueue := def.Size(bg)
+			assert.EqualValues(t, 0, scheduled.Size(bg))
+
+			// Now reset and do "kill all"
+			assert.NoError(t, str.Flush(bg))
+			seed(scheduled, 3)
+
+			w := postAction("/scheduled", "kill", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			assert.EqualValues(t, 0, scheduled.Size(bg), "scheduled should be empty")
+			assert.EqualValues(t, singleDead, dead.Size(bg), "dead count should match single-item kill")
+			assert.EqualValues(t, singleQueue, def.Size(bg), "queue count should match single-item kill (zero)")
+		})
+
+		t.Run("RetriesDeleteAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			retries := str.Retries()
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			seed(retries, 3)
+			assert.EqualValues(t, 3, retries.Size(bg))
+
+			w := postAction("/retries", "delete", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			assert.EqualValues(t, 0, retries.Size(bg), "retries should be cleared")
+			assert.EqualValues(t, 0, dead.Size(bg), "delete should not add to dead")
+			assert.EqualValues(t, 0, def.Size(bg), "delete should not enqueue")
+		})
+
+		t.Run("ScheduledDeleteAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			scheduled := str.Scheduled()
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			seed(scheduled, 3)
+			assert.EqualValues(t, 3, scheduled.Size(bg))
+
+			w := postAction("/scheduled", "delete", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			assert.EqualValues(t, 0, scheduled.Size(bg), "scheduled should be cleared")
+			assert.EqualValues(t, 0, dead.Size(bg), "delete should not add to dead")
+			assert.EqualValues(t, 0, def.Size(bg), "delete should not enqueue")
+		})
+
+		t.Run("DeadDeleteAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			seed(dead, 3)
+			assert.EqualValues(t, 3, dead.Size(bg))
+
+			w := postAction("/morgue", "delete", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			assert.EqualValues(t, 0, dead.Size(bg), "dead should be cleared")
+			assert.EqualValues(t, 0, def.Size(bg), "delete should not enqueue")
+		})
+
+		t.Run("DeadRetryAll", func(t *testing.T) {
+			assert.NoError(t, str.Flush(bg))
+			dead := str.Dead()
+			def, _ := str.GetQueue(bg, "default")
+			def.Clear(bg)
+
+			seed(dead, 3)
+			assert.EqualValues(t, 3, dead.Size(bg))
+			assert.EqualValues(t, 0, def.Size(bg))
+
+			w := postAction("/morgue", "retry", []string{"all"})
+			assert.Equal(t, 302, w.Code)
+
+			// All dead should be enqueued back to their queues
+			assert.EqualValues(t, 0, dead.Size(bg), "dead should be empty after retry all")
+			assert.EqualValues(t, 3, def.Size(bg), "all 3 jobs should be enqueued")
+		})
+	})
+}
+
 func (ui *WebUI) NewRequest(method string, urlstr string, body io.Reader) (*http.Request, error) {
 	r := httptest.NewRequest(method, urlstr, body)
 	dctx := &DefaultContext{
