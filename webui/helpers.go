@@ -257,26 +257,46 @@ func actOn(req *http.Request, set storage.SortedSet, action string, keys []strin
 			return nil
 		}
 	case "kill":
+		// "kill" moves jobs into the Dead set. When the user kills every job
+		// we expand "all" into the concrete list of keys and then fall through
+		// to the per-key path below, so killing a single job and killing all
+		// jobs share identical semantics. (Previously the "all" branch called
+		// EnqueueAll, which re-enqueued every job back onto its queue — the
+		// exact opposite of killing it.)
+		//
+		// The expansion uses a read-only scan: mutating the set during Each
+		// would shift the pagination cursor and silently skip entries, so we
+		// gather the keys first and move them afterwards.
 		if len(keys) == 1 && keys[0] == "all" {
-			return ctx(req).Store().EnqueueAll(c, set)
-		} else {
-			// TODO Make this 180 day dead job expiry dynamic per-job or
-			// a global variable in TOML? PRs welcome.
-			expiry := time.Now().Add(180 * 24 * time.Hour)
-			for idx := range keys {
-				entry, err := set.Get(c, []byte(keys[idx]))
+			keys = nil
+			err := set.Each(c, func(_ int, entry storage.SortedEntry) error {
+				key, err := entry.Key()
 				if err != nil {
 					return err
 				}
-				if entry != nil {
-					err = set.MoveTo(c, ctx(req).Store().Dead(), entry, expiry)
-					if err != nil {
-						return err
-					}
+				keys = append(keys, string(key))
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		// TODO Make this 180 day dead job expiry dynamic per-job or
+		// a global variable in TOML? PRs welcome.
+		expiry := time.Now().Add(180 * 24 * time.Hour)
+		for idx := range keys {
+			entry, err := set.Get(c, []byte(keys[idx]))
+			if err != nil {
+				return err
+			}
+			if entry != nil {
+				err = set.MoveTo(c, ctx(req).Store().Dead(), entry, expiry)
+				if err != nil {
+					return err
 				}
 			}
-			return nil
 		}
+		return nil
 	default:
 		return fmt.Errorf("invalid action: %v", action)
 	}
