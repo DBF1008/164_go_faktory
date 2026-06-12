@@ -2,6 +2,14 @@
 
 Changelog: Faktory || [Faktory Enterprise](https://github.com/contribsys/faktory/blob/main/Ent-Changes.md)
 
+## Unreleased
+
+- Make the dead set (Morgue) retention policy configurable. Operators can now
+  control both how long dead jobs are kept and the maximum number retained via
+  `[faktory] dead_timeout` (Go duration, default 180 days) and
+  `[faktory] dead_max_size` (default 10,000; set 0 to disable). Background
+  cleanup and the manual "kill"/move-to-Morgue paths now share the same policy.
+
 ## 1.9.4
 
 - Modernize JavaScript code [#524]

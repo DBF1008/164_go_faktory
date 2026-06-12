@@ -260,17 +260,14 @@ func actOn(req *http.Request, set storage.SortedSet, action string, keys []strin
 		if len(keys) == 1 && keys[0] == "all" {
 			return ctx(req).Store().EnqueueAll(c, set)
 		} else {
-			// TODO Make this 180 day dead job expiry dynamic per-job or
-			// a global variable in TOML? PRs welcome.
-			expiry := time.Now().Add(180 * 24 * time.Hour)
+			mgr := ctx(req).Server().Manager()
 			for idx := range keys {
 				entry, err := set.Get(c, []byte(keys[idx]))
 				if err != nil {
 					return err
 				}
 				if entry != nil {
-					err = set.MoveTo(c, ctx(req).Store().Dead(), entry, expiry)
-					if err != nil {
+					if err = mgr.MoveToDead(c, set, entry); err != nil {
 						return err
 					}
 				}

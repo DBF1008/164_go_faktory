@@ -96,6 +96,12 @@ type SortedSet interface {
 	RemoveBefore(ctx context.Context, timestamp string, maxCount int64, fn func(data []byte) error) (int64, error)
 	RemoveEntry(ctx context.Context, ent SortedEntry) error
 
+	// RemoveLowestRank trims the set down to at most maxSize elements by
+	// deleting the lowest-scored entries (keeping the highest-scored ones).
+	// A maxSize <= 0 disables trimming and is a no-op. It returns the number
+	// of elements removed.
+	RemoveLowestRank(ctx context.Context, maxSize int64) (int64, error)
+
 	// Move the given key from this SortedSet to the given
 	// SortedSet atomically.  The given func may mutate the payload and
 	// return a new tstamp.

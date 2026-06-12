@@ -297,6 +297,24 @@ func (rs *redisSorted) RemoveBefore(ctx context.Context, timestamp string, maxCo
 	return count, nil
 }
 
+// RemoveLowestRank keeps at most maxSize elements (those with the highest
+// scores) and deletes the rest, lowest score first. In the dead set the score
+// is a job's expiry, so this removes the jobs that have been dead longest.
+// A maxSize <= 0 means "unlimited" and removes nothing.
+func (rs *redisSorted) RemoveLowestRank(ctx context.Context, maxSize int64) (int64, error) {
+	if maxSize <= 0 {
+		return 0, nil
+	}
+	size := int64(rs.store.rclient.ZCard(ctx, rs.name).Val()) // nolint:gosec
+	excess := size - maxSize
+	if excess <= 0 {
+		return 0, nil
+	}
+	// ranks are 0-based and ordered low score -> high score, so 0..excess-1
+	// are the oldest entries to drop.
+	return rs.store.rclient.ZRemRangeByRank(ctx, rs.name, 0, excess-1).Result()
+}
+
 func (rs *redisSorted) MoveTo(ctx context.Context, sset SortedSet, entry SortedEntry, newtime time.Time) error {
 	job, err := entry.Job()
 	if err != nil {

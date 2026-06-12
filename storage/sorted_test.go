@@ -190,3 +190,47 @@ func TestBasicSortedOps(t *testing.T) {
 		})
 	})
 }
+
+func TestRemoveLowestRank(t *testing.T) {
+	withRedis(t, "lowestrank", func(t *testing.T, store Store) {
+		ctx := context.Background()
+		assert.NoError(t, store.Flush(ctx))
+		set := store.Dead()
+
+		base := time.Now()
+		for i := 0; i < 5; i++ {
+			job := client.NewJob(fmt.Sprintf("J%d", i), i)
+			job.At = util.Thens(base.Add(time.Duration(i) * time.Minute))
+			assert.NoError(t, set.Add(ctx, job))
+		}
+		assert.EqualValues(t, 5, set.Size(ctx))
+
+		// maxSize <= 0 disables trimming
+		n, err := set.RemoveLowestRank(ctx, 0)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, n)
+		assert.EqualValues(t, 5, set.Size(ctx))
+
+		// a limit at or above the current size removes nothing
+		n, err = set.RemoveLowestRank(ctx, 10)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 0, n)
+		assert.EqualValues(t, 5, set.Size(ctx))
+
+		// trimming to 2 removes the 3 lowest-scored (oldest) entries, keeping
+		// the 2 highest-scored (J3, J4)
+		n, err = set.RemoveLowestRank(ctx, 2)
+		assert.NoError(t, err)
+		assert.EqualValues(t, 3, n)
+		assert.EqualValues(t, 2, set.Size(ctx))
+
+		var types []string
+		assert.NoError(t, set.Each(ctx, func(_ int, e SortedEntry) error {
+			j, err := e.Job()
+			assert.NoError(t, err)
+			types = append(types, j.Type)
+			return nil
+		}))
+		assert.ElementsMatch(t, []string{"J3", "J4"}, types)
+	})
+}

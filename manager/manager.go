@@ -21,6 +21,12 @@ const (
 
 	// Save dead jobs for 180 days, after that they will be purged
 	DeadTTL = 180 * 24 * time.Hour
+
+	// DefaultDeadMaxSize is the maximum number of dead jobs retained by
+	// default. When the dead set grows beyond this, the oldest jobs are
+	// trimmed. Operators can override it (or set 0 to disable the limit) via
+	// the faktory/dead_max_size config. This default matches Sidekiq.
+	DefaultDeadMaxSize int64 = 10_000
 )
 
 // A KnownError is one that returns a specific error code to the client
@@ -102,6 +108,17 @@ type Manager interface {
 	// Purge deletes all dead jobs
 	Purge(ctx context.Context, when time.Time) (int64, error)
 
+	// MoveToDead atomically moves an entry from the given set into the dead
+	// set, applying the configured retention TTL and then trimming the dead
+	// set to the configured maximum size. Used by the manual "kill" paths so
+	// they behave identically to the automatic failure path.
+	MoveToDead(ctx context.Context, from storage.SortedSet, entry storage.SortedEntry) error
+
+	// SetDeadRetention configures the dead set retention policy: how long dead
+	// jobs are kept (ttl) and the maximum number retained (maxSize, <= 0 means
+	// unlimited).
+	SetDeadRetention(ttl time.Duration, maxSize int64)
+
 	// EnqueueScheduledJobs enqueues scheduled jobs
 	EnqueueScheduledJobs(ctx context.Context, when time.Time) (int64, error)
 
@@ -129,6 +146,9 @@ func newManager(s storage.Store) *manager {
 		failChain:  make(MiddlewareChain, 0),
 		ackChain:   make(MiddlewareChain, 0),
 		fetchChain: make(MiddlewareChain, 0),
+
+		deadTTL:     DeadTTL,
+		deadMaxSize: DefaultDeadMaxSize,
 	}
 	ctx := context.Background()
 	_ = m.loadWorkingSet(ctx)
@@ -140,6 +160,11 @@ func newManager(s storage.Store) *manager {
 
 func (m *manager) SetFetcher(f Fetcher) {
 	m.fetcher = f
+}
+
+func (m *manager) SetDeadRetention(ttl time.Duration, maxSize int64) {
+	m.deadTTL = ttl
+	m.deadMaxSize = maxSize
 }
 
 func (m *manager) KV() storage.KV {
@@ -186,6 +211,8 @@ type manager struct {
 	failChain    MiddlewareChain
 	ackChain     MiddlewareChain
 	paused       []string
+	deadTTL      time.Duration
+	deadMaxSize  int64
 	workingMutex sync.RWMutex
 }
 

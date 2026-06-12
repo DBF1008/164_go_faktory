@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/contribsys/faktory/client"
 	"github.com/contribsys/faktory/manager"
@@ -18,7 +17,7 @@ var (
 	}
 )
 
-func mutateKill(ctx context.Context, store storage.Store, op client.Operation) error {
+func mutateKill(ctx context.Context, m manager.Manager, store storage.Store, op client.Operation) error {
 	ss := setForTarget(store, string(op.Target))
 	if ss == nil {
 		return fmt.Errorf("invalid target for mutation command")
@@ -26,7 +25,7 @@ func mutateKill(ctx context.Context, store storage.Store, op client.Operation) e
 	match, matchfn := matchForFilter(op.Filter)
 	return ss.Find(ctx, match, func(idx int, ent storage.SortedEntry) error {
 		if matchfn(string(ent.Value())) {
-			return ss.MoveTo(ctx, store.Dead(), ent, time.Now().Add(manager.DeadTTL))
+			return m.MoveToDead(ctx, ss, ent)
 		}
 		return nil
 	})
@@ -135,7 +134,7 @@ func mutate(c *Connection, s *Server, cmd string) {
 	case "clear":
 		err = mutateClear(ctx, s.Store(), string(op.Target))
 	case "kill":
-		err = mutateKill(ctx, s.Store(), op)
+		err = mutateKill(ctx, s.manager, s.Store(), op)
 	case "discard":
 		err = mutateDiscard(ctx, s.Store(), op)
 	case "requeue":

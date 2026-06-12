@@ -11,17 +11,22 @@ import (
 )
 
 func (m *manager) Purge(ctx context.Context, when time.Time) (int64, error) {
-	// TODO We need to purge the dead set if it collects more
-	// than N elements.  The dead set shouldn't be able to collect
-	// millions or billions of jobs.  Sidekiq uses a default max size
-	// of 10,000 jobs.
+	// First drop everything past its retention TTL.
 	dead, err := m.store.Dead().RemoveBefore(ctx, util.Thens(when), 100, func([]byte) error {
 		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
-	return dead, nil
+
+	// Then enforce the maximum dead set size so a flood of failures can't grow
+	// it without bound. This keeps background cleanup consistent with the
+	// trimming done when jobs enter the morgue (sendToMorgue / MoveToDead).
+	trimmed, err := m.trimDeadSet(ctx)
+	if err != nil {
+		return dead, err
+	}
+	return dead + trimmed, nil
 }
 
 func (m *manager) EnqueueScheduledJobs(ctx context.Context, when time.Time) (int64, error) {

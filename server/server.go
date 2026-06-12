@@ -159,6 +159,8 @@ func (s *Server) Boot() error {
 	s.store = store
 	s.workers = newWorkers()
 	s.manager = manager.NewManager(store)
+	ttl, maxSize := DeadRetention(s.Options)
+	s.manager.SetDeadRetention(ttl, maxSize)
 	s.listener = listener
 	s.stopper = make(chan bool)
 	s.startTasks()

@@ -1,3 +1,11 @@
+[faktory]
+# How long jobs are kept in the dead set (Morgue) before being purged.
+# Value is a Go duration string; the default is 180 days ("4320h").
+dead_timeout = "4320h"
+# Maximum number of jobs retained in the dead set. When the set grows beyond
+# this, the oldest dead jobs are trimmed. Set to 0 to disable the limit.
+dead_max_size = 10000
+
 [queues]
 # disable backpressure by default
 backpressure = 0

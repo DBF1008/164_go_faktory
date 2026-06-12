@@ -137,7 +137,7 @@ func (m *manager) processFailure(ctx context.Context, jid string, failure *FailP
 		if job.Failure.RetryCount < *job.Retry {
 			return retryLater(ctx, m.store, job)
 		}
-		return sendToMorgue(ctx, m.store, job)
+		return m.sendToMorgue(ctx, job)
 	})
 }
 
@@ -152,14 +152,42 @@ func retryLater(ctx context.Context, store storage.Store, job *client.Job) error
 	return store.Retries().AddElement(ctx, when, job.Jid, bytes)
 }
 
-func sendToMorgue(ctx context.Context, store storage.Store, job *client.Job) error {
+// deadExpiry returns the score (a timestamp) used when a job enters the dead
+// set, derived from the configured retention TTL.
+func (m *manager) deadExpiry() time.Time {
+	return time.Now().Add(m.deadTTL)
+}
+
+// trimDeadSet enforces the configured maximum dead set size by removing the
+// oldest jobs beyond the limit. It is a no-op when no limit is configured.
+func (m *manager) trimDeadSet(ctx context.Context) (int64, error) {
+	return m.store.Dead().RemoveLowestRank(ctx, m.deadMaxSize)
+}
+
+// sendToMorgue moves a job that has exhausted its retries into the dead set,
+// using the configured retention TTL, then trims the set to the configured max.
+func (m *manager) sendToMorgue(ctx context.Context, job *client.Job) error {
 	bytes, err := json.Marshal(job)
 	if err != nil {
 		return fmt.Errorf("cannot marshal job payload: %w", err)
 	}
 
-	expiry := util.Thens(time.Now().Add(DeadTTL))
-	return store.Dead().AddElement(ctx, expiry, job.Jid, bytes)
+	if err := m.store.Dead().AddElement(ctx, util.Thens(m.deadExpiry()), job.Jid, bytes); err != nil {
+		return err
+	}
+	_, err = m.trimDeadSet(ctx)
+	return err
+}
+
+// MoveToDead atomically moves an entry from the given set into the dead set,
+// applying the same retention TTL and max-size trimming as the automatic
+// failure path, so manual kills behave identically to background cleanup.
+func (m *manager) MoveToDead(ctx context.Context, from storage.SortedSet, entry storage.SortedEntry) error {
+	if err := from.MoveTo(ctx, m.store.Dead(), entry, m.deadExpiry()); err != nil {
+		return err
+	}
+	_, err := m.trimDeadSet(ctx)
+	return err
 }
 
 func nextRetry(job *client.Job) time.Time {
