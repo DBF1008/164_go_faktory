@@ -39,7 +39,7 @@ func ego_busy(w io.Writer, req *http.Request) {
       <th><%= t(req, "Busy") %></th>
       <th>&nbsp;</th>
     </thead>
-    <% busyWorkers(req, func(worker *server.ClientData) { %>
+    <% busyWorkers(req, func(worker *server.WorkerSnapshot) { %>
       <tr>
         <td>
           <code>

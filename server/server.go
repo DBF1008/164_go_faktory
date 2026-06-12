@@ -50,7 +50,7 @@ type Server struct {
 	Subsystems []Subsystem
 
 	mu     sync.Mutex
-	closed bool
+	closed atomic.Bool
 }
 
 func (s *Server) useTLS() error {
@@ -102,14 +102,27 @@ func NewServer(opts *ServerOptions) (*Server, error) {
 		Subsystems: []Subsystem{},
 
 		stopper: make(chan bool),
-		closed:  false,
 	}
 
 	return s, nil
 }
 
-func (s *Server) Heartbeats() map[string]*ClientData {
-	return s.workers.heartbeats
+// WorkerSnapshots returns an immutable, point-in-time view of every registered
+// worker, safe to hand to the Web UI without exposing the live heartbeat map.
+func (s *Server) WorkerSnapshots() []*WorkerSnapshot {
+	return s.workers.BusyWorkers()
+}
+
+// SignalWorker sends sig to the worker identified by wid, or to every worker
+// when wid is "all", and returns the number of workers signalled.
+func (s *Server) SignalWorker(wid string, sig WorkerState) int {
+	return s.workers.Signal(wid, sig)
+}
+
+// AddWorker registers a worker heartbeat entry. It is primarily a seam for tests
+// that need to seed a known worker without performing a full handshake.
+func (s *Server) AddWorker(cd *ClientData) {
+	s.workers.add(cd)
 }
 
 func (s *Server) Store() storage.Store {
@@ -211,7 +224,7 @@ func (s *Server) Stopper() chan bool {
 func (s *Server) Stop(onStop func()) {
 	// Don't allow new network connections
 	s.mu.Lock()
-	s.closed = true
+	s.closed.Store(true)
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
@@ -378,7 +391,7 @@ func (s *Server) processLines(conn *Connection) {
 			}
 			return
 		}
-		if s.closed {
+		if s.closed.Load() {
 			_ = conn.Error("Closing connection", fmt.Errorf("shutdown in progress"))
 			return
 		}

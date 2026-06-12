@@ -72,7 +72,7 @@ func TestServerStart(t *testing.T) {
 		client.Labels = []string{"blue", "seven"}
 		client.Version = 2
 
-		val, err := json.Marshal(client)
+		val, err := json.Marshal(&client)
 		assert.NoError(t, err)
 
 		_, _ = conn.Write([]byte("HELLO "))

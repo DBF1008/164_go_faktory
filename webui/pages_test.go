@@ -389,7 +389,7 @@ func TestPages(t *testing.T) {
 				StartedAt: time.Now(),
 				Version:   2,
 			}
-			s.Heartbeats()[wid] = wrk
+			s.AddWorker(wrk)
 
 			w := httptest.NewRecorder()
 			busyHandler(w, req)
@@ -410,6 +410,30 @@ func TestPages(t *testing.T) {
 			busyHandler(w, req)
 			assert.Equal(t, 302, w.Code)
 			assert.True(t, wrk.IsQuiet())
+
+			// Full broadcast: signalling wid=all reaches every worker.
+			wid2 := "second-worker-99"
+			wrk2 := &server.ClientData{
+				Hostname:  "foobar.local",
+				Pid:       6789,
+				Wid:       wid2,
+				StartedAt: time.Now(),
+				Version:   2,
+			}
+			s.AddWorker(wrk2)
+			assert.False(t, wrk2.IsQuiet())
+
+			all := url.Values{
+				"signal": {"quiet"},
+				"wid":    {"all"},
+			}
+			req, err = ui.NewRequest("POST", "http://localhost:7420/busy", strings.NewReader(all.Encode()))
+			assert.NoError(t, err)
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			w = httptest.NewRecorder()
+			busyHandler(w, req)
+			assert.Equal(t, 302, w.Code)
+			assert.True(t, wrk2.IsQuiet())
 		})
 
 		t.Run("RequireCSRF", func(t *testing.T) {
@@ -426,7 +450,7 @@ func TestPages(t *testing.T) {
 				StartedAt: time.Now(),
 				Version:   2,
 			}
-			s.Heartbeats()[wid] = wrk
+			s.AddWorker(wrk)
 
 			w := httptest.NewRecorder()
 

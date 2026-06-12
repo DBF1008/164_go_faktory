@@ -78,7 +78,7 @@ func ego_busy(w io.Writer, req *http.Request) {
 //line busy.ego:39
 		_, _ = io.WriteString(w, "</th>\n      <th>&nbsp;</th>\n    </thead>\n    ")
 //line busy.ego:42
-		busyWorkers(req, func(worker *server.ClientData) {
+		busyWorkers(req, func(worker *server.WorkerSnapshot) {
 //line busy.ego:43
 			_, _ = io.WriteString(w, "\n      <tr>\n        <td>\n          <code>\n            ")
 //line busy.ego:46
