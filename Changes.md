@@ -2,6 +2,11 @@
 
 Changelog: Faktory || [Faktory Enterprise](https://github.com/contribsys/faktory/blob/main/Ent-Changes.md)
 
+## main
+
+- Implement `EXTEND` command so a worker can renew ("keep alive") the reservation
+  of a running job, avoiding a large `reserve_for` for long-running jobs
+
 ## 1.9.4
 
 - Modernize JavaScript code [#524]

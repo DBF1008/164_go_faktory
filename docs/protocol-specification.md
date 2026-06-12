@@ -155,9 +155,12 @@ returned to consumers that request work using `FETCH`.
 Once a work unit has been fetched, it enters the `WORKING` state. It
 remains in this state either until the responsible consumer sends an
 explicit `ACK` or `FAIL` for that work unit, or until the unit's
-reservation timer (`reserve_for`) expires. If an `ACK` is sent for the
-work unit, it is purged from the server. If a `FAIL` is sent, or its
-reservation expires, the work unit enters the `RETRIES` state.
+reservation timer (`reserve_for`) expires. A consumer that needs more
+time to finish a long-running job MAY renew its reservation with the
+`EXTEND` command (see below), rather than choosing a large `reserve_for`
+up front. If an `ACK` is sent for the work unit, it is purged from the
+server. If a `FAIL` is sent, or its reservation expires, the work unit
+enters the `RETRIES` state.
 
 If a retrying job has reached its `retry` limit, it is killed, and
 marked as `DEAD`. Otherwise, it is eventually enqueued again so that
@@ -515,4 +518,47 @@ C: BEAT {"wid": "4qpc2443vpvai","current_state": "quiet"}
 S: +{"state": "terminate"}
 C: END
 S: +OK
+```
+
+### `EXTEND` Command
+
+Arguments: `{jid: String, reserve_for: Integer}`
+
+Responses:
+
+ - Simple String "OK" - the reservation was renewed
+ - Error - the job is not currently reserved, or the command was malformed
+
+`EXTEND` lets a consumer renew ("keep alive") the reservation of a job it is
+currently executing, so that a long-running job is not considered failed and
+requeued while it is still making progress. It is the in-flight alternative to
+picking a large `reserve_for` up front: a worker MAY reserve a job for a modest
+duration and periodically `EXTEND` it for as long as it keeps working.
+
+The argument is a JSON hash with the following fields:
+
+| Field name    | Description |
+| ------------- | ----------- |
+| `jid`         | the `jid` of the job whose reservation should be renewed.
+| `reserve_for` | number of seconds, counted from the time the server handles the command, to continue holding the job. It is interpreted exactly like a work unit's `reserve_for` and clamped to the same `[60, 86400]` range. When omitted, the server's default reservation timeout is used.
+
+The server moves the job's reaper deadline to approximately `now + reserve_for`.
+Renewing to a time earlier than the current deadline has no effect. As an
+optimization, the new deadline is held in memory and only written back to the
+working set lazily — when the original deadline would otherwise have caused the
+job to be requeued — which keeps `EXTEND` cheap on the hot path.
+
+A consumer SHOULD only `EXTEND` a job that it previously obtained via `FETCH` and
+has not yet `ACK`'d or `FAIL`'d. If the job is no longer reserved — because it was
+already acknowledged or failed, or because a previous reservation expired and the
+job was requeued — the server responds with an Error. This signals that the
+consumer has lost the job and SHOULD stop working on it.
+
+#### Examples
+
+```example
+C: EXTEND {"jid":"b3b6c4f5e1a2d8f0","reserve_for":300}
+S: +OK
+C: EXTEND {"jid":"unknownjobid1234","reserve_for":300}
+S: -ERR job unknownjobid1234 is not reserved
 ```

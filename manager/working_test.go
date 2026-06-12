@@ -144,14 +144,17 @@ func TestLoadWorkingSet(t *testing.T) {
 			assert.EqualValues(t, 0, count)
 			assert.EqualValues(t, 0, store.Retries().Size(bg))
 
-			err = m.ExtendReservation(bg, "nosuch", time.Now().Add(50*time.Hour))
+			// extending a job that is not in the working set reports not-found
+			found, err := m.ExtendReservation(bg, "nosuch", time.Now().Add(50*time.Hour))
 			assert.NoError(t, err)
+			assert.False(t, found)
 
 			util.LogInfo = true
 			util.LogDebug = true
 			util.Infof("Extending %s", job.Jid)
-			err = m.ExtendReservation(bg, job.Jid, time.Now().Add(50*time.Hour))
+			found, err = m.ExtendReservation(bg, job.Jid, time.Now().Add(50*time.Hour))
 			assert.NoError(t, err)
+			assert.True(t, found)
 
 			exp = time.Now().Add(time.Duration(DefaultTimeout+10) * time.Second)
 			count, err = m.ReapExpiredJobs(bg, exp)

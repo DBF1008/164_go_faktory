@@ -37,15 +37,28 @@ func (res *Reservation) ExpiresAt() time.Time {
 	return res.texpiry
 }
 
-func (m *manager) ExtendReservation(ctx context.Context, jid string, until time.Time) error {
+// ExtendReservation extends the deadline of a currently-reserved job so a
+// long-running worker can keep its lease alive past the original reserve_for.
+// The new deadline is kept in memory and applied lazily by ReapExpiredJobs to
+// avoid rewriting the working set's sorted-set score on the hot path. Extending
+// to a time before the current expiry is a no-op.
+//
+// It reports whether the job was found in the working set. A false result means
+// the job is not reserved here (e.g. it was already ACK'd, FAIL'd, or reaped),
+// so the extension did not apply and the caller can tell the worker it no longer
+// holds the job.
+func (m *manager) ExtendReservation(ctx context.Context, jid string, until time.Time) (bool, error) {
 	m.workingMutex.Lock()
-	if localres, ok := m.workingMap[jid]; ok {
-		if localres.texpiry.Before(until) {
-			localres.extension = until
-		}
+	defer m.workingMutex.Unlock()
+
+	localres, ok := m.workingMap[jid]
+	if !ok {
+		return false, nil
 	}
-	m.workingMutex.Unlock()
-	return nil
+	if localres.texpiry.Before(until) {
+		localres.extension = until
+	}
+	return true, nil
 }
 
 func (m *manager) WorkingCount() int {

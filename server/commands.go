@@ -26,6 +26,7 @@ var CommandSet = map[string]command{
 	"FETCH":  fetch,
 	"ACK":    ack,
 	"FAIL":   fail,
+	"EXTEND": extend,
 	"BEAT":   heartbeat,
 	"INFO":   info,
 	"FLUSH":  flush,
@@ -303,6 +304,59 @@ func fail(c *Connection, s *Server, cmd string) {
 		_ = c.Error(cmd, err)
 		return
 	}
+	_ = c.Ok()
+}
+
+type extendRequest struct {
+	Jid        string `json:"jid"`
+	ReserveFor int    `json:"reserve_for"`
+}
+
+// EXTEND {"jid":"123456789","reserve_for":300}
+//
+// Renews ("keeps alive") the reservation of a job a worker is currently holding,
+// pushing its reaper deadline out to now + reserve_for so a long-running job is
+// not requeued while still executing. reserve_for is interpreted exactly like the
+// FETCH-time value and clamped to [60, 86400] seconds (defaulting to the standard
+// reservation when omitted). It is an error to extend a job that is not currently
+// reserved (already ACK'd, FAIL'd, or reaped), so the worker learns it no longer
+// holds the lease.
+func extend(c *Connection, s *Server, cmd string) {
+	if len(cmd) < 8 {
+		_ = c.Error(cmd, fmt.Errorf("invalid EXTEND %q", cmd))
+		return
+	}
+	data := cmd[7:]
+
+	var req extendRequest
+	err := util.JsonUnmarshal([]byte(data), &req)
+	if err != nil || req.Jid == "" {
+		_ = c.Error(cmd, fmt.Errorf("invalid EXTEND %s", data))
+		return
+	}
+
+	timeout := req.ReserveFor
+	if timeout == 0 {
+		timeout = manager.DefaultTimeout
+	}
+	if timeout < 60 {
+		timeout = 60
+	}
+	if timeout > 86400 {
+		timeout = 86400
+	}
+
+	until := time.Now().Add(time.Duration(timeout) * time.Second)
+	found, err := s.manager.ExtendReservation(c.Context, req.Jid, until)
+	if err != nil {
+		_ = c.Error(cmd, err)
+		return
+	}
+	if !found {
+		_ = c.Error(cmd, fmt.Errorf("job %s is not reserved", req.Jid))
+		return
+	}
+
 	_ = c.Ok()
 }
 

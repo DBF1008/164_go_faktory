@@ -294,6 +294,23 @@ func (c *Client) Ack(jid string) error {
 	return c.ok(c.rdr)
 }
 
+// Extend renews ("keeps alive") the reservation of a job this worker is currently
+// executing, pushing its server-side deadline out to reserveForSeconds from now so
+// that a long-running job is not reaped and requeued while it is still in progress.
+// Like a job's reserve_for, the value is clamped server-side to [60, 86400] seconds.
+//
+// It returns an error if the job is no longer reserved by the server (for example it
+// was already ACK'd or FAIL'd, or a previous reservation expired and the job was
+// requeued), letting the worker detect that it has lost the job.
+func (c *Client) Extend(jid string, reserveForSeconds int) error {
+	err := c.writeLine(c.wtr, "EXTEND", fmt.Appendf(nil, `{"jid":%q,"reserve_for":%d}`, jid, reserveForSeconds))
+	if err != nil {
+		return err
+	}
+
+	return c.ok(c.rdr)
+}
+
 // Result is map[JID]ErrorMessage
 func (c *Client) PushBulk(jobs []*Job) (map[string]string, error) {
 	jobBytes, err := json.Marshal(jobs)

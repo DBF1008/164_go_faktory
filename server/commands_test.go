@@ -104,5 +104,44 @@ func TestCommands(t *testing.T) {
 			txt = output(c)
 			assert.Equal(t, fmt.Sprintf("$57\r\n{%q:\"jobs must have a jobtype parameter\"}\r\n", job1.Jid), txt)
 		})
+
+		t.Run("extend", func(t *testing.T) {
+			c := dummyConnection()
+			ctx := c.Context
+
+			flush(c, s, "FLUSH")
+			assert.Equal(t, "+OK\r\n", output(c))
+
+			job := client.NewJob("ExtendMe", 1, 2, 3)
+			assert.NoError(t, s.Manager().Push(ctx, job))
+
+			// reserve the job so it lands in the working set
+			fetched, err := s.Manager().Fetch(ctx, "extend-wid", job.Queue)
+			assert.NoError(t, err)
+			assert.NotNil(t, fetched)
+			assert.Equal(t, job.Jid, fetched.Jid)
+
+			// success: a live reservation can be renewed
+			extend(c, s, fmt.Sprintf(`EXTEND {"jid":%q,"reserve_for":300}`, job.Jid))
+			assert.Equal(t, "+OK\r\n", output(c))
+
+			// reserve_for is optional; the default keeps the lease alive too
+			extend(c, s, fmt.Sprintf(`EXTEND {"jid":%q}`, job.Jid))
+			assert.Equal(t, "+OK\r\n", output(c))
+
+			// invalid job: an unknown jid is rejected so the worker learns it lost the lease
+			extend(c, s, `EXTEND {"jid":"nosuchjob","reserve_for":300}`)
+			assert.Equal(t, "-ERR job nosuchjob is not reserved\r\n", output(c))
+
+			// malformed payloads are rejected
+			extend(c, s, "EXTEND not-json")
+			assert.Equal(t, "-ERR invalid EXTEND not-json\r\n", output(c))
+
+			// once acknowledged the job leaves the working set and can no longer be renewed
+			_, err = s.Manager().Acknowledge(ctx, job.Jid)
+			assert.NoError(t, err)
+			extend(c, s, fmt.Sprintf(`EXTEND {"jid":%q,"reserve_for":300}`, job.Jid))
+			assert.Equal(t, fmt.Sprintf("-ERR job %s is not reserved\r\n", job.Jid), output(c))
+		})
 	})
 }

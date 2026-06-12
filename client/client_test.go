@@ -112,6 +112,21 @@ func TestClientOperations(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Contains(t, <-req, "FAIL")
 
+		// EXTEND success: server accepts the keep-alive
+		resp <- "+OK\r\n"
+		err = cl.Extend("123456", 300)
+		assert.NoError(t, err)
+		extendReq := <-req
+		assert.Contains(t, extendReq, "EXTEND")
+		assert.Contains(t, extendReq, `"jid":"123456"`)
+		assert.Contains(t, extendReq, `"reserve_for":300`)
+
+		// EXTEND invalid job: server rejects, client surfaces the error
+		resp <- "-ERR job 123456 is not reserved\r\n"
+		err = cl.Extend("123456", 300)
+		assert.Error(t, err)
+		assert.Contains(t, <-req, "EXTEND")
+
 		resp <- "$2\r\n{}\r\n"
 		hash, err := cl.Info()
 		assert.NoError(t, err)
