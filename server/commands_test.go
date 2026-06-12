@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"testing"
+	"time"
 
 	"github.com/contribsys/faktory/client"
 	"github.com/contribsys/faktory/util"
@@ -103,6 +104,91 @@ func TestCommands(t *testing.T) {
 			pushBulk(c, s, cmd)
 			txt = output(c)
 			assert.Equal(t, fmt.Sprintf("$57\r\n{%q:\"jobs must have a jobtype parameter\"}\r\n", job1.Jid), txt)
+		})
+
+		t.Run("RENEW", func(t *testing.T) {
+			c := dummyConnection()
+
+			// Flush first
+			flush(c, s, "flush")
+			_ = output(c)
+
+			// RENEW on non-existent job
+			renew(c, s, `RENEW {"jid":"doesnotexist"}`)
+			txt := output(c)
+			assert.Contains(t, txt, "-ERR")
+			assert.Contains(t, txt, "no such job")
+
+			// Push + Fetch + RENEW success
+			job := client.NewJob("RenewableType", 1, 2)
+			job.ReserveFor = 120
+			assert.NoError(t, s.Manager().Push(c.Context, job))
+
+			fetched, err := s.Manager().Fetch(c.Context, "testwid", "default")
+			assert.NoError(t, err)
+			assert.NotNil(t, fetched)
+
+			renew(c, s, fmt.Sprintf(`RENEW {"jid":%q,"reserve_for":3600}`, job.Jid))
+			txt = output(c)
+			assert.Equal(t, "+OK\r\n", txt)
+
+			// RENEW with default reserve_for
+			renew(c, s, fmt.Sprintf(`RENEW {"jid":%q}`, job.Jid))
+			txt = output(c)
+			assert.Equal(t, "+OK\r\n", txt)
+
+			// RENEW with invalid JSON
+			renew(c, s, `RENEW {bad json}`)
+			txt = output(c)
+			assert.Contains(t, txt, "-ERR")
+
+			// RENEW with missing jid
+			renew(c, s, `RENEW {"reserve_for":3600}`)
+			txt = output(c)
+			assert.Contains(t, txt, "-ERR")
+			assert.Contains(t, txt, "missing jid")
+
+			// ACK then RENEW — should fail
+			_, err = s.Manager().Acknowledge(c.Context, job.Jid)
+			assert.NoError(t, err)
+
+			renew(c, s, fmt.Sprintf(`RENEW {"jid":%q}`, job.Jid))
+			txt = output(c)
+			assert.Contains(t, txt, "-ERR")
+			assert.Contains(t, txt, "no such job")
+		})
+
+		t.Run("RENEW prevents reaping", func(t *testing.T) {
+			c := dummyConnection()
+
+			flush(c, s, "flush")
+			_ = output(c)
+
+			// Push a job with very short reserve_for (60s = minimum)
+			job := client.NewJob("LongRunningJob", 1, 2)
+			job.ReserveFor = 60
+			assert.NoError(t, s.Manager().Push(c.Context, job))
+
+			// Fetch it to put it in the working set
+			fetched, err := s.Manager().Fetch(c.Context, "testwid", "default")
+			assert.NoError(t, err)
+			assert.NotNil(t, fetched)
+
+			// RENEW it for 1 hour
+			renew(c, s, fmt.Sprintf(`RENEW {"jid":%q,"reserve_for":3600}`, job.Jid))
+			txt := output(c)
+			assert.Equal(t, "+OK\r\n", txt)
+
+			// Reap at 70 seconds (past original 60s expiry) — should NOT reap
+			ctx := c.Context
+			count, err := s.Manager().ReapExpiredJobs(ctx, time.Now().Add(70*time.Second))
+			assert.NoError(t, err)
+			assert.EqualValues(t, 0, count)
+
+			// Reap at 3610 seconds (past renewed expiry) — should reap
+			count, err = s.Manager().ReapExpiredJobs(ctx, time.Now().Add(3610*time.Second))
+			assert.NoError(t, err)
+			assert.EqualValues(t, 1, count)
 		})
 	})
 }

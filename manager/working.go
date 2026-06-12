@@ -37,15 +37,17 @@ func (res *Reservation) ExpiresAt() time.Time {
 	return res.texpiry
 }
 
-func (m *manager) ExtendReservation(ctx context.Context, jid string, until time.Time) error {
+func (m *manager) ExtendReservation(ctx context.Context, jid string, until time.Time) (bool, error) {
 	m.workingMutex.Lock()
-	if localres, ok := m.workingMap[jid]; ok {
-		if localres.texpiry.Before(until) {
-			localres.extension = until
-		}
+	defer m.workingMutex.Unlock()
+	localres, ok := m.workingMap[jid]
+	if !ok {
+		return false, nil
 	}
-	m.workingMutex.Unlock()
-	return nil
+	if localres.texpiry.Before(until) {
+		localres.extension = until
+	}
+	return true, nil
 }
 
 func (m *manager) WorkingCount() int {

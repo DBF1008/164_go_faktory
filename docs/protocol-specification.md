@@ -155,9 +155,11 @@ returned to consumers that request work using `FETCH`.
 Once a work unit has been fetched, it enters the `WORKING` state. It
 remains in this state either until the responsible consumer sends an
 explicit `ACK` or `FAIL` for that work unit, or until the unit's
-reservation timer (`reserve_for`) expires. If an `ACK` is sent for the
-work unit, it is purged from the server. If a `FAIL` is sent, or its
-reservation expires, the work unit enters the `RETRIES` state.
+reservation timer (`reserve_for`) expires. While in the `WORKING` state,
+the consumer MAY issue `RENEW` to extend the reservation timer. If an
+`ACK` is sent for the work unit, it is purged from the server. If a
+`FAIL` is sent, or its reservation expires, the work unit enters the
+`RETRIES` state.
 
 If a retrying job has reached its `retry` limit, it is killed, and
 marked as `DEAD`. Otherwise, it is eventually enqueued again so that
@@ -515,4 +517,44 @@ C: BEAT {"wid": "4qpc2443vpvai","current_state": "quiet"}
 S: +{"state": "terminate"}
 C: END
 S: +OK
+```
+
+### `RENEW` Command
+
+Arguments: `{jid: String, reserve_for: Integer}`
+
+Responses:
+
+ - Simple String "OK" - reservation was renewed
+ - Error - renewal was malformed or rejected
+
+Consumers MAY issue a `RENEW` command for any job currently being
+executed (i.e., in the `WORKING` state) to extend its reservation
+timer. This is useful for long-running jobs whose execution time
+may exceed the original `reserve_for` value.
+
+The argument is a JSON hash with the following fields:
+
+| Field name    | Required | Description |
+| ------------- | -------- | ----------- |
+| `jid`         | Yes      | the `jid` of the job whose reservation should be renewed.
+| `reserve_for` | No       | number of seconds to extend the reservation from now. If omitted, the server's default timeout (1800 seconds) is used. Values are clamped to [60, 86400].
+
+If the specified `jid` is not currently in the working set (e.g., it has
+already been acknowledged, failed, or expired), the server responds with
+an error.
+
+A successful `RENEW` resets the reservation expiry to `now + reserve_for`.
+Subsequent `ACK` or `FAIL` commands continue to work normally on renewed
+jobs.
+
+#### Examples
+
+```example
+C: RENEW {"jid":"abc123","reserve_for":3600}
+S: +OK
+C: RENEW {"jid":"abc123"}
+S: +OK
+C: RENEW {"jid":"nonexistent"}
+S: -ERR no such job
 ```

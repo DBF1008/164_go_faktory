@@ -112,6 +112,28 @@ func TestClientOperations(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Contains(t, <-req, "FAIL")
 
+		resp <- "+OK\r\n"
+		err = cl.Renew("123456", 3600)
+		assert.NoError(t, err)
+		renewReq := <-req
+		assert.Contains(t, renewReq, "RENEW")
+		assert.Contains(t, renewReq, `"jid":"123456"`)
+		assert.Contains(t, renewReq, `"reserve_for":3600`)
+
+		resp <- "+OK\r\n"
+		err = cl.Renew("123456", 0)
+		assert.NoError(t, err)
+		renewReq = <-req
+		assert.Contains(t, renewReq, "RENEW")
+		assert.Contains(t, renewReq, `"jid":"123456"`)
+		assert.NotContains(t, renewReq, "reserve_for")
+
+		resp <- "-ERR no such job\r\n"
+		err = cl.Renew("nonexistent", 60)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no such job")
+		assert.Contains(t, <-req, "RENEW")
+
 		resp <- "$2\r\n{}\r\n"
 		hash, err := cl.Info()
 		assert.NoError(t, err)

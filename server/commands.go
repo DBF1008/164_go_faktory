@@ -33,6 +33,7 @@ var CommandSet = map[string]command{
 	"BATCH":  batch,
 	"TRACK":  track,
 	"QUEUE":  queue,
+	"RENEW":  renew,
 }
 
 func track(c *Connection, s *Server, cmd string) {
@@ -350,4 +351,49 @@ func heartbeat(c *Connection, s *Server, cmd string) {
 	} else {
 		_ = c.Result(fmt.Appendf(nil, `{"state":%q}`, stateString(worker.state)))
 	}
+}
+
+type RenewRequest struct {
+	Jid        string `json:"jid"`
+	ReserveFor int    `json:"reserve_for,omitempty"`
+}
+
+// RENEW {"jid":"123456789","reserve_for":3600}
+func renew(c *Connection, s *Server, cmd string) {
+	data := cmd[6:]
+
+	var req RenewRequest
+	err := util.JsonUnmarshal([]byte(data), &req)
+	if err != nil {
+		_ = c.Error(cmd, fmt.Errorf("invalid RENEW %s", data))
+		return
+	}
+	if req.Jid == "" {
+		_ = c.Error(cmd, fmt.Errorf("invalid RENEW: missing jid"))
+		return
+	}
+
+	timeout := req.ReserveFor
+	if timeout == 0 {
+		timeout = manager.DefaultTimeout
+	}
+	if timeout < 60 {
+		timeout = 60
+	}
+	if timeout > 86400 {
+		timeout = 86400
+	}
+
+	until := time.Now().Add(time.Duration(timeout) * time.Second)
+	found, err := s.manager.ExtendReservation(c.Context, req.Jid, until)
+	if err != nil {
+		_ = c.Error(cmd, err)
+		return
+	}
+	if !found {
+		_ = c.Error(cmd, fmt.Errorf("no such job"))
+		return
+	}
+
+	_ = c.Ok()
 }

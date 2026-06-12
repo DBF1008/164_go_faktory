@@ -90,10 +90,11 @@ type Manager interface {
 
 	Fail(ctx context.Context, fail *FailPayload) error
 
-	// Allows arbitrary extension of a job's current reservation
+	// Allows arbitrary extension of a job's current reservation.
+	// Returns true if the job was found in the working set, false otherwise.
 	// This is a no-op if you set the time before the current
 	// reservation expiry.
-	ExtendReservation(ctx context.Context, jid string, until time.Time) error
+	ExtendReservation(ctx context.Context, jid string, until time.Time) (bool, error)
 
 	WorkingCount() int
 

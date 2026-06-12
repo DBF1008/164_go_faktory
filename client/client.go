@@ -294,6 +294,30 @@ func (c *Client) Ack(jid string) error {
 	return c.ok(c.rdr)
 }
 
+// Renew extends the reservation for a currently-executing job,
+// giving the worker more time to complete it.
+// If duration is 0, the server's default reservation timeout is used.
+// The server clamps duration to [60, 86400] seconds.
+// Returns an error if the job is not in the working set (already ACKed,
+// FAILed, or expired).
+func (c *Client) Renew(jid string, duration int) error {
+	payload := map[string]any{
+		"jid": jid,
+	}
+	if duration > 0 {
+		payload["reserve_for"] = duration
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	err = c.writeLine(c.wtr, "RENEW", data)
+	if err != nil {
+		return err
+	}
+	return c.ok(c.rdr)
+}
+
 // Result is map[JID]ErrorMessage
 func (c *Client) PushBulk(jobs []*Job) (map[string]string, error) {
 	jobBytes, err := json.Marshal(jobs)
